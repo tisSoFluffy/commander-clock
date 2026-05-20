@@ -183,10 +183,12 @@ function SoloOrHostApp({ mode, onExit }) {
   const [peerError, setPeerError] = useState(null);
   const [connectedPeers, setConnectedPeers] = useState([]);
   const [commanderImages, setCommanderImages] = useState({});
+  const [notes, setNotes] = useState({});
   const peerRef = useRef(null);
   const connsRef = useRef(new Map());
   const stateRef = useRef(null);
   const commanderImagesRef = useRef({});
+  const notesRef = useRef({});
 
   // ── timer ticks ─────────────────────────────────────────
   const tickRef = useRef(null);
@@ -249,6 +251,9 @@ function SoloOrHostApp({ mode, onExit }) {
           if (Object.keys(commanderImagesRef.current).length) {
             sendTo(conn, { type: "commander-images", payload: commanderImagesRef.current });
           }
+          if (Object.keys(notesRef.current).length) {
+            sendTo(conn, { type: "notes", payload: notesRef.current });
+          }
         });
         conn.on("data", (msg) => handlePeerMsg(conn, msg));
         conn.on("close", () => {
@@ -285,6 +290,10 @@ function SoloOrHostApp({ mode, onExit }) {
   useEffect(() => {
     commanderImagesRef.current = commanderImages;
   }, [commanderImages]);
+
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
 
   const sendTo = (conn, msg) => { try { conn.send(msg); } catch {} };
 
@@ -342,7 +351,35 @@ function SoloOrHostApp({ mode, onExit }) {
         });
         return prev;
       });
+    } else if (msg.type === "set-note") {
+      const { text } = msg;
+      if (typeof text !== "string") return;
+      setPlayers((prev) => {
+        const myIdx = prev.findIndex((p) => p.claimedBy === conn.peer);
+        if (myIdx === -1) return prev;
+        setNotes((n) => {
+          const updated = { ...n, [myIdx]: text };
+          notesRef.current = updated;
+          for (const c of connsRef.current.values()) {
+            sendTo(c, { type: "notes", payload: updated });
+          }
+          return updated;
+        });
+        return prev;
+      });
     }
+  };
+
+  // ── host note update (direct, no peer message needed) ───
+  const updateNote = (seat, text) => {
+    setNotes((n) => {
+      const updated = { ...n, [seat]: text };
+      notesRef.current = updated;
+      for (const conn of connsRef.current.values()) {
+        sendTo(conn, { type: "notes", payload: updated });
+      }
+      return updated;
+    });
   };
 
   // ── game logic ──────────────────────────────────────────
@@ -472,6 +509,8 @@ function SoloOrHostApp({ mode, onExit }) {
       onAdjustLife={adjustLife}
       onNewGame={newGame}
       commanderImages={commanderImages}
+      notes={notes}
+      onUpdateNote={updateNote}
       hostBanner={
         mode === "host" && (
           <HostBanner
@@ -644,7 +683,9 @@ function JoinerApp({ initialCode, onExit }) {
   const [mySeat, setMySeat] = useState(null);
   const [remote, setRemote] = useState(null);
   const [scanOpen, setScanOpen] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
   const [commanderImages, setCommanderImages] = useState({});
+  const [notes, setNotes] = useState({});
   const peerRef = useRef(null);
   const connRef = useRef(null);
 
@@ -662,6 +703,7 @@ function JoinerApp({ initialCode, onExit }) {
           if (msg.type === "state") setRemote(msg.payload);
           if (msg.type === "roster") setRoster(msg.payload || []);
           if (msg.type === "commander-images") setCommanderImages(msg.payload || {});
+          if (msg.type === "notes") setNotes(msg.payload || {});
         });
         conn.on("close", () => {
           setStatus("error");
@@ -705,6 +747,7 @@ function JoinerApp({ initialCode, onExit }) {
   const adjustLife = (delta) => connRef.current?.send({ type: "life-delta", delta });
   const setCommander = ({ img, name, text, power, toughness, loyalty }) =>
     connRef.current?.send({ type: "set-commander", img, name, text, power, toughness, loyalty });
+  const sendNote = (text) => connRef.current?.send({ type: "set-note", text });
 
   if (status === "idle" || status === "connecting") {
     return (
@@ -790,6 +833,13 @@ function JoinerApp({ initialCode, onExit }) {
           onClose={() => setScanOpen(false)}
         />
       )}
+      {noteOpen && (
+        <NoteModal
+          initialText={notes[mySeat] || ""}
+          onSave={(text) => { sendNote(text); setNoteOpen(false); }}
+          onClose={() => setNoteOpen(false)}
+        />
+      )}
       <div
         className={`cc-myseat ${isMyTurn ? "active" : ""} ${me.eliminated ? "out" : ""}`}
         style={{
@@ -822,13 +872,25 @@ function JoinerApp({ initialCode, onExit }) {
               ? remote.running ? "TAP TO END TURN" : "paused by host"
               : `waiting · ${remote.players[remote.activeIdx]?.name}'s turn`}
           </div>
-          <button
-            className="cc-scan-btn"
-            onClick={(e) => { e.stopPropagation(); setScanOpen(true); }}
-          >
-            📷 Commander
-          </button>
+          <div className="cc-joiner-btns">
+            <button
+              className="cc-scan-btn"
+              onClick={(e) => { e.stopPropagation(); setScanOpen(true); }}
+            >
+              📷 Commander
+            </button>
+            <button
+              className="cc-scan-btn"
+              onClick={(e) => { e.stopPropagation(); setNoteOpen(true); }}
+            >
+              {notes[mySeat] ? "📝 Edit Note" : "📝 Note"}
+            </button>
+          </div>
         </div>
+        {/* My note strip */}
+        {notes[mySeat] && (
+          <div className="cc-seat-note joiner-note">{notes[mySeat]}</div>
+        )}
         {/* Commander footer — pinned to the bottom */}
         {(commanderImages[mySeat]?.name || commanderImages[mySeat]?.text) && (
           <div className="cc-seat-cmdr-footer">
@@ -875,6 +937,9 @@ function JoinerApp({ initialCode, onExit }) {
             )}
             <div className="cc-other-life">{p.life}</div>
             <div className="cc-other-time">{fmt(p.elapsed)}</div>
+            {notes[p.seat] && (
+              <div className="cc-other-note">{notes[p.seat]}</div>
+            )}
           </div>
         ))}
       </div>
@@ -895,12 +960,23 @@ function Game({
   thinkMs, thinkRunning, onToggleThink, onResetThink,
   onPass, onTogglePause, onUndo, onEliminate, onAdjustLife, onNewGame,
   commanderImages = {},
+  notes = {},
+  onUpdateNote,
   hostBanner,
 }) {
+  const [notesOpen, setNotesOpen] = useState(false);
   const grid = players.length <= 4 ? "grid-2x2" : "grid-5";
   const aliveCount = players.filter((p) => !p.eliminated).length;
   return (
     <div className="cc-game">
+      {notesOpen && (
+        <TableNotesModal
+          players={players}
+          notes={notes}
+          onUpdate={onUpdateNote}
+          onClose={() => setNotesOpen(false)}
+        />
+      )}
       {hostBanner}
       <div className={`cc-grid ${grid}`}>
         {players.map((p, i) => (
@@ -916,6 +992,7 @@ function Game({
             commanderPower={commanderImages[i]?.power}
             commanderToughness={commanderImages[i]?.toughness}
             commanderLoyalty={commanderImages[i]?.loyalty}
+            noteText={notes[i] || ""}
             onPass={onPass}
             onEliminate={() => onEliminate(i)}
             onAdjustLife={(delta) => onAdjustLife(i, delta)}
@@ -940,6 +1017,7 @@ function Game({
         <button className={`cc-ctl ${running ? "" : "paused"}`} onClick={onTogglePause}>
           {running ? "❚❚ Pause" : "▶ Resume"}
         </button>
+        <button className="cc-ctl" onClick={() => setNotesOpen(true)}>📝 Notes</button>
         <button className="cc-ctl" onClick={onNewGame}>⟲ New</button>
       </div>
       {aliveCount <= 1 && (
@@ -982,7 +1060,7 @@ function LifeBtn({ delta, onAdjust, className }) {
   );
 }
 
-function SeatPanel({ player, color, active, running, commanderImg, commanderName, commanderText, commanderPower, commanderToughness, commanderLoyalty, onPass, onEliminate, onAdjustLife }) {
+function SeatPanel({ player, color, active, running, commanderImg, commanderName, commanderText, commanderPower, commanderToughness, commanderLoyalty, noteText, onPass, onEliminate, onAdjustLife }) {
   const pressTimer = useRef(null);
   const longFired = useRef(false);
 
@@ -1034,6 +1112,10 @@ function SeatPanel({ player, color, active, running, commanderImg, commanderName
           <div className="cc-tap">{running ? "tap to pass" : "paused"}</div>
         )}
       </div>
+      {/* Note strip — sits just above commander footer */}
+      {noteText ? (
+        <div className="cc-seat-note">{noteText}</div>
+      ) : null}
       {/* Commander footer — pinned to the bottom */}
       {(commanderName || commanderText) && (
         <div className="cc-seat-cmdr-footer">
@@ -1051,6 +1133,71 @@ function SeatPanel({ player, color, active, running, commanderImg, commanderName
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── Table Notes Modal (host) ────────────────────────────── */
+function TableNotesModal({ players, notes, onUpdate, onClose }) {
+  return (
+    <div className="cc-scan-overlay" onClick={onClose}>
+      <div className="cc-scan-modal cc-notes-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="cc-scan-close" onClick={onClose}>✕</button>
+        <div className="cc-scan-title">Table Notes</div>
+        <p className="cc-notes-hint">
+          Emblems, Monarch, Initiative, counters — anything the table should remember.
+        </p>
+        <div className="cc-notes-list">
+          {players.map((p, i) => (
+            <div key={i} className="cc-notes-row">
+              <label className="cc-notes-seat" style={{ color: SEAT_COLORS[i].ink }}>
+                {p.name}
+              </label>
+              <textarea
+                className="cc-notes-input"
+                rows={2}
+                placeholder="No notes…"
+                value={notes[i] || ""}
+                onChange={(e) => onUpdate(i, e.target.value)}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Note Modal (joiner — edit own seat) ─────────────────── */
+function NoteModal({ initialText, onSave, onClose }) {
+  const [text, setText] = useState(initialText);
+  return (
+    <div className="cc-scan-overlay" onClick={onClose}>
+      <div className="cc-scan-modal cc-notes-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="cc-scan-close" onClick={onClose}>✕</button>
+        <div className="cc-scan-title">My Note</div>
+        <p className="cc-notes-hint">
+          Emblems, effects, reminders — visible to everyone at the table.
+        </p>
+        <textarea
+          className="cc-notes-input cc-notes-input-solo"
+          rows={4}
+          placeholder="e.g. Has Monarch · Jace emblem active"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          autoFocus
+        />
+        <div className="cc-scan-actions">
+          <button className="cc-scan-confirm" onClick={() => onSave(text)}>
+            Save Note
+          </button>
+          {text && (
+            <button className="cc-scan-retry" onClick={() => onSave("")}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1814,6 +1961,58 @@ const CSS = `
   font-family: 'JetBrains Mono', monospace; font-weight: 700;
   font-size: 13px; color: #6e6655; margin-top: 1px;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── note strip (SeatPanel + joiner) ── */
+.cc-seat-note {
+  position: relative; z-index: 2;
+  width: 100%; flex-shrink: 0;
+  padding: 5px 10px;
+  background: rgba(184,154,78,0.13);
+  border-top: 1px solid rgba(184,154,78,0.25);
+  font-family: 'Spectral', serif; font-style: italic;
+  font-size: 10px; line-height: 1.4; color: #d8bc70;
+  white-space: pre-wrap; word-break: break-word;
+}
+.cc-seat-note.joiner-note {
+  font-size: 12px; padding: 7px 14px;
+  border-radius: 0 0 6px 6px;
+}
+
+/* ── joiner button row ── */
+.cc-joiner-btns {
+  display: flex; gap: 8px; justify-content: center;
+  position: relative; z-index: 2;
+}
+
+/* ── notes modal ── */
+.cc-notes-modal { gap: 10px; }
+.cc-notes-hint {
+  font-family: 'Spectral', serif; font-style: italic;
+  font-size: 13px; color: #6e6655; margin: 0; text-align: center;
+}
+.cc-notes-list { display: flex; flex-direction: column; gap: 12px; }
+.cc-notes-row { display: flex; flex-direction: column; gap: 4px; }
+.cc-notes-seat {
+  font-family: 'Cinzel', serif; font-size: 12px;
+  letter-spacing: 1px; text-transform: uppercase;
+}
+.cc-notes-input {
+  width: 100%; padding: 10px 12px;
+  font-family: 'Spectral', serif; font-size: 14px; line-height: 1.5;
+  background: #14110c; color: #e8dcc0;
+  border: 1px solid #34301f; border-radius: 10px;
+  outline: none; resize: none;
+}
+.cc-notes-input:focus { border-color: #b89a4e; }
+.cc-notes-input-solo { min-height: 100px; }
+
+/* ── other-player note ── */
+.cc-other-note {
+  position: relative; z-index: 1;
+  font-family: 'Spectral', serif; font-style: italic;
+  font-size: 10px; color: #d8bc70; line-height: 1.3;
+  margin-top: 2px; word-break: break-word;
 }
 
 /* ── commander scan button ── */
