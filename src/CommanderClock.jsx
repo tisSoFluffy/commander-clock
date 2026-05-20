@@ -182,9 +182,11 @@ function SoloOrHostApp({ mode, onExit }) {
   const [peerStatus, setPeerStatus] = useState("idle");
   const [peerError, setPeerError] = useState(null);
   const [connectedPeers, setConnectedPeers] = useState([]);
+  const [commanderImages, setCommanderImages] = useState({});
   const peerRef = useRef(null);
   const connsRef = useRef(new Map());
   const stateRef = useRef(null);
+  const commanderImagesRef = useRef({});
 
   // ── timer ticks ─────────────────────────────────────────
   const tickRef = useRef(null);
@@ -244,6 +246,9 @@ function SoloOrHostApp({ mode, onExit }) {
               claimedBy: pl.claimedBy,
             })),
           });
+          if (Object.keys(commanderImagesRef.current).length) {
+            sendTo(conn, { type: "commander-images", payload: commanderImagesRef.current });
+          }
         });
         conn.on("data", (msg) => handlePeerMsg(conn, msg));
         conn.on("close", () => {
@@ -266,7 +271,7 @@ function SoloOrHostApp({ mode, onExit }) {
     };
   }, [mode, roomCode]);
 
-  // keep stateRef fresh and broadcast on every change
+  // keep stateRef + commanderImagesRef fresh and broadcast on every change
   useEffect(() => {
     const snap = { stage, players, activeIdx, running, thinkMs, thinkRunning };
     stateRef.current = snap;
@@ -276,6 +281,10 @@ function SoloOrHostApp({ mode, onExit }) {
       }
     }
   }, [stage, players, activeIdx, running, thinkMs, thinkRunning, mode]);
+
+  useEffect(() => {
+    commanderImagesRef.current = commanderImages;
+  }, [commanderImages]);
 
   const sendTo = (conn, msg) => { try { conn.send(msg); } catch {} };
 
@@ -316,6 +325,22 @@ function SoloOrHostApp({ mode, onExit }) {
         const myIdx = prev.findIndex((p) => p.claimedBy === conn.peer);
         if (myIdx === -1) return prev;
         return prev.map((p, i) => (i === myIdx ? { ...p, life: p.life + delta } : p));
+      });
+    } else if (msg.type === "set-commander") {
+      const { img, name, text, power, toughness, loyalty } = msg;
+      if (typeof img !== "string") return;
+      setPlayers((prev) => {
+        const myIdx = prev.findIndex((p) => p.claimedBy === conn.peer);
+        if (myIdx === -1) return prev;
+        setCommanderImages((ci) => {
+          const updated = { ...ci, [myIdx]: { img, name: name || "", text: text || "", power: power ?? null, toughness: toughness ?? null, loyalty: loyalty ?? null } };
+          commanderImagesRef.current = updated;
+          for (const c of connsRef.current.values()) {
+            sendTo(c, { type: "commander-images", payload: updated });
+          }
+          return updated;
+        });
+        return prev;
       });
     }
   };
@@ -446,6 +471,7 @@ function SoloOrHostApp({ mode, onExit }) {
       onEliminate={toggleEliminated}
       onAdjustLife={adjustLife}
       onNewGame={newGame}
+      commanderImages={commanderImages}
       hostBanner={
         mode === "host" && (
           <HostBanner
@@ -617,6 +643,8 @@ function JoinerApp({ initialCode, onExit }) {
   const [roster, setRoster] = useState([]);
   const [mySeat, setMySeat] = useState(null);
   const [remote, setRemote] = useState(null);
+  const [scanOpen, setScanOpen] = useState(false);
+  const [commanderImages, setCommanderImages] = useState({});
   const peerRef = useRef(null);
   const connRef = useRef(null);
 
@@ -633,6 +661,7 @@ function JoinerApp({ initialCode, onExit }) {
         conn.on("data", (msg) => {
           if (msg.type === "state") setRemote(msg.payload);
           if (msg.type === "roster") setRoster(msg.payload || []);
+          if (msg.type === "commander-images") setCommanderImages(msg.payload || {});
         });
         conn.on("close", () => {
           setStatus("error");
@@ -674,6 +703,8 @@ function JoinerApp({ initialCode, onExit }) {
   const pass = () => connRef.current?.send({ type: "pass" });
   const toggleThink = () => connRef.current?.send({ type: "think-toggle" });
   const adjustLife = (delta) => connRef.current?.send({ type: "life-delta", delta });
+  const setCommander = ({ img, name, text, power, toughness, loyalty }) =>
+    connRef.current?.send({ type: "set-commander", img, name, text, power, toughness, loyalty });
 
   if (status === "idle" || status === "connecting") {
     return (
@@ -753,32 +784,70 @@ function JoinerApp({ initialCode, onExit }) {
 
   return (
     <div className="cc-joiner">
+      {scanOpen && (
+        <CommanderScanModal
+          onConfirm={(data) => { setCommander(data); setScanOpen(false); }}
+          onClose={() => setScanOpen(false)}
+        />
+      )}
       <div
         className={`cc-myseat ${isMyTurn ? "active" : ""} ${me.eliminated ? "out" : ""}`}
         style={{
           "--ink": SEAT_COLORS[mySeat].ink,
           "--glow": SEAT_COLORS[mySeat].glow,
           "--seatbg": SEAT_COLORS[mySeat].bg,
+          ...(commanderImages[mySeat]?.img
+            ? { "--cmdr-img": `url("${commanderImages[mySeat].img}")` }
+            : {}),
         }}
         onClick={() => {
           if (isMyTurn && remote.running && !me.eliminated) pass();
         }}
       >
-        <div className="cc-myseat-name">{me.name}</div>
-        <div className="cc-myseat-life">
-          <LifeBtn delta={-1} onAdjust={adjustLife} className="cc-lifebtn-lg" />
-          <span className="cc-myseat-lifenum">{me.life}</span>
-          <LifeBtn delta={1} onAdjust={adjustLife} className="cc-lifebtn-lg" />
+        {commanderImages[mySeat]?.img && <div className="cc-seat-art" />}
+        {/* Main stats — centered */}
+        <div className="cc-myseat-main">
+          <div className="cc-myseat-name">{me.name}</div>
+          <div className="cc-myseat-life">
+            <LifeBtn delta={-1} onAdjust={adjustLife} className="cc-lifebtn-lg" />
+            <span className="cc-myseat-lifenum">{me.life}</span>
+            <LifeBtn delta={1} onAdjust={adjustLife} className="cc-lifebtn-lg" />
+          </div>
+          <div className="cc-myseat-time">{fmt(me.elapsed)}</div>
+          <div className="cc-myseat-turns">{me.turns} turns played</div>
+          <div className="cc-myseat-cta">
+            {me.eliminated
+              ? "eliminated"
+              : isMyTurn
+              ? remote.running ? "TAP TO END TURN" : "paused by host"
+              : `waiting · ${remote.players[remote.activeIdx]?.name}'s turn`}
+          </div>
+          <button
+            className="cc-scan-btn"
+            onClick={(e) => { e.stopPropagation(); setScanOpen(true); }}
+          >
+            📷 Commander
+          </button>
         </div>
-        <div className="cc-myseat-time">{fmt(me.elapsed)}</div>
-        <div className="cc-myseat-turns">{me.turns} turns played</div>
-        <div className="cc-myseat-cta">
-          {me.eliminated
-            ? "eliminated"
-            : isMyTurn
-            ? remote.running ? "TAP TO END TURN" : "paused by host"
-            : `waiting · ${remote.players[remote.activeIdx]?.name}'s turn`}
-        </div>
+        {/* Commander footer — pinned to the bottom */}
+        {(commanderImages[mySeat]?.name || commanderImages[mySeat]?.text) && (
+          <div className="cc-seat-cmdr-footer">
+            <div className="cc-seat-cmdr-row">
+              {commanderImages[mySeat]?.name && (
+                <span className="cc-seat-cmdrname">{commanderImages[mySeat].name}</span>
+              )}
+              {commanderImages[mySeat]?.power != null && commanderImages[mySeat]?.toughness != null && (
+                <span className="cc-seat-pt">{commanderImages[mySeat].power}/{commanderImages[mySeat].toughness}</span>
+              )}
+              {commanderImages[mySeat]?.loyalty != null && commanderImages[mySeat]?.power == null && (
+                <span className="cc-seat-pt loyalty">{commanderImages[mySeat].loyalty}</span>
+              )}
+            </div>
+            {commanderImages[mySeat]?.text && (
+              <div className="cc-seat-cmdrtext">{commanderImages[mySeat].text}</div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="cc-others">
@@ -786,9 +855,24 @@ function JoinerApp({ initialCode, onExit }) {
           <div
             key={p.seat}
             className={`cc-other ${p.seat === remote.activeIdx ? "active" : ""} ${p.eliminated ? "out" : ""}`}
-            style={{ "--ink": SEAT_COLORS[p.seat].ink }}
+            style={{
+              "--ink": SEAT_COLORS[p.seat].ink,
+              ...(commanderImages[p.seat]?.img
+                ? { "--cmdr-img": `url("${commanderImages[p.seat].img}")` }
+                : {}),
+            }}
           >
+            {commanderImages[p.seat]?.img && <div className="cc-other-art" />}
             <div className="cc-other-name">{p.name}</div>
+            {commanderImages[p.seat]?.name && (
+              <div className="cc-other-cmdrname">{commanderImages[p.seat].name}</div>
+            )}
+            {commanderImages[p.seat]?.power != null && commanderImages[p.seat]?.toughness != null && (
+              <div className="cc-other-pt">{commanderImages[p.seat].power}/{commanderImages[p.seat].toughness}</div>
+            )}
+            {commanderImages[p.seat]?.loyalty != null && commanderImages[p.seat]?.power == null && (
+              <div className="cc-other-pt">{commanderImages[p.seat].loyalty}★</div>
+            )}
             <div className="cc-other-life">{p.life}</div>
             <div className="cc-other-time">{fmt(p.elapsed)}</div>
           </div>
@@ -810,6 +894,7 @@ function Game({
   players, activeIdx, running, canUndo,
   thinkMs, thinkRunning, onToggleThink, onResetThink,
   onPass, onTogglePause, onUndo, onEliminate, onAdjustLife, onNewGame,
+  commanderImages = {},
   hostBanner,
 }) {
   const grid = players.length <= 4 ? "grid-2x2" : "grid-5";
@@ -825,6 +910,12 @@ function Game({
             color={SEAT_COLORS[i]}
             active={i === activeIdx}
             running={running}
+            commanderImg={commanderImages[i]?.img}
+            commanderName={commanderImages[i]?.name}
+            commanderText={commanderImages[i]?.text}
+            commanderPower={commanderImages[i]?.power}
+            commanderToughness={commanderImages[i]?.toughness}
+            commanderLoyalty={commanderImages[i]?.loyalty}
             onPass={onPass}
             onEliminate={() => onEliminate(i)}
             onAdjustLife={(delta) => onAdjustLife(i, delta)}
@@ -891,7 +982,7 @@ function LifeBtn({ delta, onAdjust, className }) {
   );
 }
 
-function SeatPanel({ player, color, active, running, onPass, onEliminate, onAdjustLife }) {
+function SeatPanel({ player, color, active, running, commanderImg, commanderName, commanderText, commanderPower, commanderToughness, commanderLoyalty, onPass, onEliminate, onAdjustLife }) {
   const pressTimer = useRef(null);
   const longFired = useRef(false);
 
@@ -911,29 +1002,320 @@ function SeatPanel({ player, color, active, running, onPass, onEliminate, onAdju
   return (
     <div
       className={`cc-seat ${active ? "active" : ""} ${player.eliminated ? "out" : ""}`}
-      style={{ "--ink": color.ink, "--glow": color.glow, "--seatbg": color.bg }}
+      style={{
+        "--ink": color.ink,
+        "--glow": color.glow,
+        "--seatbg": color.bg,
+        ...(commanderImg ? { "--cmdr-img": `url("${commanderImg}")` } : {}),
+      }}
       onPointerDown={start}
       onPointerUp={end}
       onPointerLeave={() => clearTimeout(pressTimer.current)}
     >
-      <div className="cc-seat-top">
-        <span className="cc-seatname">
-          {player.name}
-          {player.claimedBy && (
-            <span className="cc-onphone" title="On their own phone">📱</span>
+      {commanderImg && <div className="cc-seat-art" />}
+      {/* Main stats — centered in the available space */}
+      <div className="cc-seat-main">
+        <div className="cc-seat-top">
+          <span className="cc-seatname">
+            {player.name}
+            {player.claimedBy && (
+              <span className="cc-onphone" title="On their own phone">📱</span>
+            )}
+          </span>
+          <span className="cc-turns">{player.turns} turns</span>
+        </div>
+        <div className="cc-life-row">
+          <LifeBtn delta={-1} onAdjust={onAdjustLife} />
+          <span className="cc-life">{player.life}</span>
+          <LifeBtn delta={1} onAdjust={onAdjustLife} />
+        </div>
+        <div className="cc-time">{fmt(player.elapsed)}</div>
+        {active && !player.eliminated && (
+          <div className="cc-tap">{running ? "tap to pass" : "paused"}</div>
+        )}
+      </div>
+      {/* Commander footer — pinned to the bottom */}
+      {(commanderName || commanderText) && (
+        <div className="cc-seat-cmdr-footer">
+          <div className="cc-seat-cmdr-row">
+            {commanderName && <span className="cc-seat-cmdrname">{commanderName}</span>}
+            {commanderPower != null && commanderToughness != null && (
+              <span className="cc-seat-pt">{commanderPower}/{commanderToughness}</span>
+            )}
+            {commanderLoyalty != null && commanderPower == null && (
+              <span className="cc-seat-pt loyalty">{commanderLoyalty}</span>
+            )}
+          </div>
+          {commanderText && (
+            <div className="cc-seat-cmdrtext">{commanderText}</div>
           )}
-        </span>
-        <span className="cc-turns">{player.turns} turns</span>
-      </div>
-      <div className="cc-life-row">
-        <LifeBtn delta={-1} onAdjust={onAdjustLife} />
-        <span className="cc-life">{player.life}</span>
-        <LifeBtn delta={1} onAdjust={onAdjustLife} />
-      </div>
-      <div className="cc-time">{fmt(player.elapsed)}</div>
-      {active && !player.eliminated && (
-        <div className="cc-tap">{running ? "tap to pass" : "paused"}</div>
+        </div>
       )}
+    </div>
+  );
+}
+
+/* ── Commander Scan Modal ────────────────────────────────── */
+async function initTesseract() {
+  const { createWorker } = await import("tesseract.js");
+  const worker = await createWorker("eng");
+  await worker.setParameters({
+    tessedit_pageseg_mode: "7",
+    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',- ",
+  });
+  return worker;
+}
+
+async function ocrTitleStrip(video, worker) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return null;
+
+  // Card guide rect: centered, portrait 63:88 aspect, 80% of shorter dimension
+  const shorter = Math.min(vw, vh);
+  const cardW = shorter * 0.75;
+  const cardH = cardW * (88 / 63);
+  const cardX = (vw - cardW) / 2;
+  const cardY = (vh - cardH) / 2;
+
+  // Title strip: top 14% of card height, left 65% of width (excludes mana cost)
+  const stripW = cardW * 0.65;
+  const stripH = cardH * 0.14;
+
+  const canvas = document.createElement("canvas");
+  // Scale 3x for better OCR accuracy
+  canvas.width = stripW * 3;
+  canvas.height = stripH * 3;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(video, cardX, cardY, stripW, stripH, 0, 0, canvas.width, canvas.height);
+
+  // Grayscale + contrast boost
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const c = gray < 128 ? Math.max(0, gray - 50) : Math.min(255, gray + 50);
+    d[i] = d[i + 1] = d[i + 2] = c;
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  const { data: { text, confidence } } = await worker.recognize(canvas);
+  const cleaned = text.replace(/[^A-Za-z',\- ]/g, "").trim();
+  return confidence > 35 && cleaned.length >= 3 ? cleaned : null;
+}
+
+async function scryfallFuzzy(name) {
+  const url = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const card = await res.json();
+  if (card.object === "error") return null;
+  return card;
+}
+
+async function scryfallSearch(query) {
+  const url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=name&unique=cards`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const json = await res.json();
+  return (json.data || []).slice(0, 6);
+}
+
+function CommanderScanModal({ onConfirm, onClose }) {
+  const [phase, setPhase] = useState("init"); // init | loading | scanning | detected | search | error
+  const [errMsg, setErrMsg] = useState("");
+  const [detected, setDetected] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+
+  const videoRef = useRef(null);
+  const workerRef = useRef(null);
+  const streamRef = useRef(null);
+  const scanIntervalRef = useRef(null);
+  const lastScannedRef = useRef("");
+  const searchTimerRef = useRef(null);
+  const scanActiveRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPhase("loading");
+    initTesseract()
+      .then((w) => {
+        if (cancelled) { w.terminate(); return; }
+        workerRef.current = w;
+        startCamera();
+      })
+      .catch((e) => {
+        if (!cancelled) { setErrMsg(e.message); setPhase("error"); }
+      });
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, []);
+
+  const cleanup = () => {
+    scanActiveRef.current = false;
+    clearInterval(scanIntervalRef.current);
+    clearTimeout(searchTimerRef.current);
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    workerRef.current?.terminate().catch(() => {});
+    workerRef.current = null;
+    streamRef.current = null;
+  };
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      setPhase("scanning");
+      beginScanLoop();
+    } catch (e) {
+      setErrMsg("Camera access denied — use search below instead.");
+      setPhase("search");
+    }
+  };
+
+  const beginScanLoop = () => {
+    scanActiveRef.current = true;
+    scanIntervalRef.current = setInterval(async () => {
+      if (!workerRef.current || !videoRef.current || !scanActiveRef.current) return;
+      const text = await ocrTitleStrip(videoRef.current, workerRef.current).catch(() => null);
+      if (!text || text === lastScannedRef.current) return;
+      lastScannedRef.current = text;
+      const card = await scryfallFuzzy(text).catch(() => null);
+      if (card && scanActiveRef.current) {
+        scanActiveRef.current = false;
+        clearInterval(scanIntervalRef.current);
+        setDetected(card);
+        setPhase("detected");
+      }
+    }, 1200);
+  };
+
+  const resumeScan = () => {
+    lastScannedRef.current = "";
+    setDetected(null);
+    setPhase("scanning");
+    beginScanLoop();
+  };
+
+  const handleSearchInput = (q) => {
+    setSearchQuery(q);
+    clearTimeout(searchTimerRef.current);
+    if (q.length < 2) { setSearchResults([]); return; }
+    setSearching(true);
+    searchTimerRef.current = setTimeout(async () => {
+      const results = await scryfallSearch(q).catch(() => []);
+      setSearchResults(results);
+      setSearching(false);
+    }, 450);
+  };
+
+  const confirmCard = (card) => {
+    // Double-faced cards store image_uris and oracle_text per face
+    const faces = card.card_faces;
+    const img =
+      card.image_uris?.art_crop ||
+      faces?.[0]?.image_uris?.art_crop ||
+      card.image_uris?.normal ||
+      faces?.[0]?.image_uris?.normal ||
+      card.image_uris?.large ||
+      faces?.[0]?.image_uris?.large;
+    const text =
+      card.oracle_text ||
+      (faces ? faces.map((f) => `${f.name}\n${f.oracle_text}`).join("\n—\n") : "");
+    // Power/toughness for creatures, loyalty for planeswalkers
+    const power = card.power ?? faces?.[0]?.power ?? null;
+    const toughness = card.toughness ?? faces?.[0]?.toughness ?? null;
+    const loyalty = card.loyalty ?? faces?.[0]?.loyalty ?? null;
+    if (img) onConfirm({ img, name: card.name, text, power, toughness, loyalty });
+  };
+
+  const artUrl = (card) =>
+    card.image_uris?.art_crop || card.image_uris?.normal || "";
+
+  return (
+    <div className="cc-scan-overlay" onClick={(e) => e.stopPropagation()}>
+      <div className="cc-scan-modal">
+        <button className="cc-scan-close" onClick={onClose}>✕</button>
+        <div className="cc-scan-title">Set Commander</div>
+
+        {/* Camera area */}
+        {(phase === "loading" || phase === "scanning" || phase === "detected") && (
+          <div className="cc-cam-wrap">
+            <video ref={videoRef} className="cc-cam-video" playsInline muted />
+            <div className="cc-cam-guide">
+              <div className="cc-cam-title-strip" />
+            </div>
+            {phase === "loading" && (
+              <div className="cc-cam-overlay-msg">
+                <span className="cc-spin" /> Loading scanner…
+              </div>
+            )}
+            {phase === "scanning" && (
+              <div className="cc-cam-overlay-msg scanning">
+                Hold card in frame
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Detected card confirmation */}
+        {phase === "detected" && detected && (
+          <div className="cc-scan-result">
+            {artUrl(detected) && (
+              <img className="cc-scan-art" src={artUrl(detected)} alt={detected.name} />
+            )}
+            <div className="cc-scan-cardname">{detected.name}</div>
+            <div className="cc-scan-actions">
+              <button className="cc-scan-confirm" onClick={() => confirmCard(detected)}>
+                Use This Commander
+              </button>
+              <button className="cc-scan-retry" onClick={resumeScan}>
+                Scan Again
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Search fallback */}
+        <div className="cc-scan-search-wrap">
+          <div className="cc-scan-search-label">
+            {phase === "error" ? errMsg : "Or search by name"}
+          </div>
+          <input
+            className="cc-input cc-scan-search-input"
+            placeholder="Commander name…"
+            value={searchQuery}
+            onChange={(e) => handleSearchInput(e.target.value)}
+          />
+          {searching && <div className="cc-scan-searching"><span className="cc-spin" /> Searching…</div>}
+          {searchResults.length > 0 && (
+            <div className="cc-scan-results-list">
+              {searchResults.map((card) => (
+                <button
+                  key={card.id}
+                  className="cc-scan-result-item"
+                  onClick={() => confirmCard(card)}
+                >
+                  {artUrl(card) && (
+                    <img className="cc-scan-thumb" src={artUrl(card)} alt="" />
+                  )}
+                  <span>{card.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1121,13 +1503,58 @@ const CSS = `
 
 .cc-seat {
   position: relative; border-radius: 14px;
-  padding: 16px; display: flex; flex-direction: column;
-  justify-content: center; align-items: center; gap: 6px;
+  padding: 0; display: flex; flex-direction: column;
+  justify-content: space-between; align-items: stretch;
   background: linear-gradient(165deg, var(--seatbg), #110f0b);
   border: 1px solid #2c281c;
   cursor: pointer; overflow: hidden;
   transition: transform .12s ease, box-shadow .25s ease, opacity .25s ease;
 }
+.cc-seat-main {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 6px; padding: 16px 16px 8px;
+}
+.cc-seat-art {
+  position: absolute; inset: 0; z-index: 0;
+  background-image: var(--cmdr-img);
+  background-size: cover; background-position: center top;
+  opacity: 0.28;
+  transition: opacity .4s ease;
+}
+.cc-seat.active .cc-seat-art { opacity: 0.38; }
+.cc-seat-top, .cc-life-row, .cc-time, .cc-tap, .cc-turns { position: relative; z-index: 1; }
+
+/* Commander footer shared by SeatPanel + cc-myseat */
+.cc-seat-cmdr-footer {
+  position: relative; z-index: 2;
+  width: 100%; flex-shrink: 0;
+  padding: 7px 10px 10px;
+  background: linear-gradient(to top, rgba(0,0,0,0.72) 0%, rgba(0,0,0,0.45) 100%);
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+.cc-seat-cmdr-row {
+  display: flex; align-items: baseline;
+  justify-content: space-between; gap: 6px;
+  margin-bottom: 4px;
+}
+.cc-seat-cmdrname {
+  font-family: 'Spectral', serif; font-style: italic; font-size: 11px;
+  color: var(--ink); opacity: 0.85; letter-spacing: 0.3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.cc-seat-cmdrtext {
+  font-family: 'Spectral', serif; font-size: 10px; line-height: 1.45;
+  color: #d0c5a8; white-space: pre-wrap;
+  max-height: 68px; overflow-y: auto; scrollbar-width: none;
+}
+.cc-seat-cmdrtext::-webkit-scrollbar { display: none; }
+.cc-seat-pt {
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', monospace; font-weight: 700;
+  font-size: 12px; letter-spacing: 0.5px; color: #f0e6cc;
+}
+.cc-seat-pt.loyalty { color: #7ec4e8; }
 .cc-seat.active {
   border-color: var(--glow);
   box-shadow: 0 0 0 1px var(--glow), 0 0 32px -4px var(--ink),
@@ -1267,13 +1694,18 @@ const CSS = `
 }
 .cc-myseat {
   flex: 1; min-height: 50vh; border-radius: 16px;
-  padding: 24px;
+  padding: 0;
   display: flex; flex-direction: column;
-  justify-content: center; align-items: center; gap: 10px;
+  justify-content: space-between; align-items: stretch;
   background: linear-gradient(165deg, var(--seatbg), #110f0b);
   border: 1px solid #2c281c;
   cursor: pointer; position: relative; overflow: hidden;
   transition: box-shadow .25s ease, transform .12s ease;
+}
+.cc-myseat-main {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px; padding: 24px 24px 8px;
 }
 .cc-myseat.active {
   border-color: var(--glow);
@@ -1291,9 +1723,11 @@ const CSS = `
 .cc-myseat-name {
   font-family: 'Cinzel', serif; font-weight: 600; font-size: 22px;
   color: var(--ink); letter-spacing: 1px;
+  position: relative; z-index: 1;
 }
 .cc-myseat-life {
   display: flex; align-items: center; gap: 14px;
+  position: relative; z-index: 1; flex-shrink: 0;
 }
 .cc-myseat-lifenum {
   font-family: 'JetBrains Mono', monospace; font-weight: 700;
@@ -1303,6 +1737,7 @@ const CSS = `
   text-shadow: 0 2px 18px rgba(0,0,0,0.5);
 }
 .cc-myseat-time {
+  position: relative; z-index: 1;
   font-family: 'JetBrains Mono', monospace; font-weight: 700;
   font-size: clamp(56px, 18vw, 96px); line-height: 1;
   color: #fff; letter-spacing: 2px;
@@ -1310,11 +1745,13 @@ const CSS = `
   font-variant-numeric: tabular-nums;
 }
 .cc-myseat-turns {
+  position: relative; z-index: 1;
   font-family: 'JetBrains Mono', monospace; font-size: 12px;
   color: #8a8270; letter-spacing: 1px;
 }
 .cc-myseat-cta {
-  margin-top: 12px;
+  position: relative; z-index: 1;
+  margin-top: 4px;
   font-family: 'Cinzel', serif; font-size: 13px;
   letter-spacing: 3px; text-transform: uppercase;
   color: var(--glow);
@@ -1326,10 +1763,37 @@ const CSS = `
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
 }
 .cc-other {
+  position: relative;
   padding: 10px 12px; border-radius: 10px;
   background: linear-gradient(165deg, #1c1812, #0e0c08);
   border: 1px solid #2c281c;
+  overflow: hidden;
   transition: border-color .25s;
+}
+.cc-other-art {
+  position: absolute; inset: 0; z-index: 0;
+  background-image: var(--cmdr-img);
+  background-size: cover; background-position: center top;
+  opacity: 0.22;
+}
+.cc-other.active .cc-other-art { opacity: 0.32; }
+.cc-other-name, .cc-other-life, .cc-other-time { position: relative; z-index: 1; }
+.cc-other-cmdrname {
+  position: relative; z-index: 1;
+  font-family: 'Spectral', serif; font-style: italic; font-size: 10px;
+  color: var(--ink); opacity: 0.65;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-top: -1px; margin-bottom: 2px;
+}
+.cc-other-pt {
+  position: relative; z-index: 1;
+  display: inline-block;
+  padding: 1px 6px; margin-bottom: 3px;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace; font-weight: 700;
+  font-size: 11px; color: #f0e6cc;
 }
 .cc-other.active {
   border-color: var(--ink);
@@ -1350,5 +1814,145 @@ const CSS = `
   font-family: 'JetBrains Mono', monospace; font-weight: 700;
   font-size: 13px; color: #6e6655; margin-top: 1px;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── commander scan button ── */
+.cc-scan-btn {
+  position: relative; z-index: 2;
+  margin-top: 4px; padding: 8px 18px;
+  font-family: 'Cinzel', serif; font-size: 11px; letter-spacing: 1.5px;
+  text-transform: uppercase; color: #8a8270;
+  background: rgba(0,0,0,0.45); border: 1px solid #34301f;
+  border-radius: 999px; cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.cc-scan-btn:active { opacity: 0.7; }
+
+/* ── scan modal overlay ── */
+.cc-scan-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(10,8,6,0.92);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.cc-scan-modal {
+  width: 100%; max-width: 480px; max-height: 92vh;
+  background: linear-gradient(180deg, #1c1812, #13110d);
+  border: 1px solid #34301f; border-radius: 20px 20px 0 0;
+  padding: 20px 16px 32px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px;
+  position: relative;
+}
+.cc-scan-close {
+  position: absolute; top: 16px; right: 16px;
+  background: transparent; border: none; color: #6e6655;
+  font-size: 18px; cursor: pointer; padding: 4px 8px;
+}
+.cc-scan-title {
+  font-family: 'Cinzel', serif; font-size: 14px;
+  letter-spacing: 2px; text-transform: uppercase;
+  color: #a99a6c; text-align: center; margin-top: 4px;
+}
+
+/* ── camera view ── */
+.cc-cam-wrap {
+  position: relative; width: 100%; border-radius: 12px; overflow: hidden;
+  background: #000; aspect-ratio: 4/3;
+}
+.cc-cam-video {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.cc-cam-guide {
+  position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.cc-cam-guide::before {
+  content: "";
+  width: 72%; aspect-ratio: 63/88;
+  border: 2px solid rgba(216,188,112,0.7);
+  border-radius: 8px;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
+}
+.cc-cam-title-strip {
+  position: absolute;
+  top: calc(50% - 44% * (88/63) / 2);
+  left: calc(50% - 36%);
+  width: 46.8%; /* 72% * 0.65 */
+  height: calc(72% * (88/63) * 0.14);
+  border: 1px dashed rgba(216,188,112,0.5);
+  border-radius: 3px;
+  background: rgba(216,188,112,0.06);
+}
+.cc-cam-overlay-msg {
+  position: absolute; bottom: 10px; left: 0; right: 0;
+  text-align: center; font-family: 'Cinzel', serif;
+  font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: rgba(232,220,192,0.8);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.cc-cam-overlay-msg.scanning {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* ── detected card result ── */
+.cc-scan-result {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.cc-scan-art {
+  width: 100%; max-height: 180px; object-fit: cover;
+  border-radius: 10px; border: 1px solid #34301f;
+}
+.cc-scan-cardname {
+  font-family: 'Cinzel', serif; font-size: 16px;
+  color: #f0e6cc; letter-spacing: 0.5px; text-align: center;
+}
+.cc-scan-actions {
+  display: flex; gap: 8px; width: 100%;
+}
+.cc-scan-confirm {
+  flex: 1; padding: 14px;
+  font-family: 'Cinzel', serif; font-weight: 700; font-size: 13px;
+  letter-spacing: 1px; text-transform: uppercase;
+  color: #1a1610; cursor: pointer;
+  background: linear-gradient(180deg, #d8bc70, #a8893e);
+  border: 1px solid #e8d090; border-radius: 10px;
+}
+.cc-scan-retry {
+  padding: 14px 18px;
+  font-family: 'Cinzel', serif; font-size: 13px; letter-spacing: 1px;
+  background: #14110c; color: #8a8270;
+  border: 1px solid #34301f; border-radius: 10px; cursor: pointer;
+}
+
+/* ── search fallback ── */
+.cc-scan-search-wrap {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.cc-scan-search-label {
+  font-family: 'Cinzel', serif; font-size: 11px;
+  letter-spacing: 1.5px; text-transform: uppercase;
+  color: #6e6655;
+}
+.cc-scan-search-input { width: 100%; }
+.cc-scan-searching {
+  font-family: 'Spectral', serif; font-size: 13px; color: #8a8270;
+  display: flex; align-items: center; gap: 6px;
+}
+.cc-scan-results-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 260px; overflow-y: auto;
+}
+.cc-scan-result-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 8px;
+  background: #14110c; border: 1px solid #2c281c;
+  color: #e8dcc0; font-family: 'Spectral', serif; font-size: 14px;
+  cursor: pointer; text-align: left;
+  transition: border-color .15s;
+}
+.cc-scan-result-item:hover { border-color: #b89a4e; }
+.cc-scan-thumb {
+  width: 48px; height: 34px; object-fit: cover;
+  border-radius: 4px; flex-shrink: 0;
 }
 `;
