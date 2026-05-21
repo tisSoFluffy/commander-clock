@@ -370,6 +370,18 @@ function SoloOrHostApp({ mode, onExit }) {
     }
   };
 
+  // ── host commander update (direct, no peer message needed) ─
+  const setCommanderForSeat = (seat, data) => {
+    setCommanderImages((ci) => {
+      const updated = { ...ci, [seat]: data };
+      commanderImagesRef.current = updated;
+      for (const conn of connsRef.current.values()) {
+        sendTo(conn, { type: "commander-images", payload: updated });
+      }
+      return updated;
+    });
+  };
+
   // ── host note update (direct, no peer message needed) ───
   const updateNote = (seat, text) => {
     setNotes((n) => {
@@ -511,6 +523,7 @@ function SoloOrHostApp({ mode, onExit }) {
       commanderImages={commanderImages}
       notes={notes}
       onUpdateNote={updateNote}
+      onSetCommander={setCommanderForSeat}
       hostBanner={
         mode === "host" && (
           <HostBanner
@@ -962,6 +975,7 @@ function Game({
   commanderImages = {},
   notes = {},
   onUpdateNote,
+  onSetCommander,
   hostBanner,
 }) {
   const [notesOpen, setNotesOpen] = useState(false);
@@ -996,6 +1010,7 @@ function Game({
             onPass={onPass}
             onEliminate={() => onEliminate(i)}
             onAdjustLife={(delta) => onAdjustLife(i, delta)}
+            onSetCommander={onSetCommander ? (data) => onSetCommander(i, data) : null}
           />
         ))}
       </div>
@@ -1060,9 +1075,10 @@ function LifeBtn({ delta, onAdjust, className }) {
   );
 }
 
-function SeatPanel({ player, color, active, running, commanderImg, commanderName, commanderText, commanderPower, commanderToughness, commanderLoyalty, noteText, onPass, onEliminate, onAdjustLife }) {
+function SeatPanel({ player, color, active, running, commanderImg, commanderName, commanderText, commanderPower, commanderToughness, commanderLoyalty, noteText, onPass, onEliminate, onAdjustLife, onSetCommander }) {
   const pressTimer = useRef(null);
   const longFired = useRef(false);
+  const [scanOpen, setScanOpen] = useState(false);
 
   const start = () => {
     longFired.current = false;
@@ -1078,62 +1094,84 @@ function SeatPanel({ player, color, active, running, commanderImg, commanderName
   };
 
   return (
-    <div
-      className={`cc-seat ${active ? "active" : ""} ${player.eliminated ? "out" : ""}`}
-      style={{
-        "--ink": color.ink,
-        "--glow": color.glow,
-        "--seatbg": color.bg,
-        ...(commanderImg ? { "--cmdr-img": `url("${commanderImg}")` } : {}),
-      }}
-      onPointerDown={start}
-      onPointerUp={end}
-      onPointerLeave={() => clearTimeout(pressTimer.current)}
-    >
-      {commanderImg && <div className="cc-seat-art" />}
-      {/* Main stats — centered in the available space */}
-      <div className="cc-seat-main">
-        <div className="cc-seat-top">
-          <span className="cc-seatname">
-            {player.name}
-            {player.claimedBy && (
-              <span className="cc-onphone" title="On their own phone">📱</span>
-            )}
-          </span>
-          <span className="cc-turns">{player.turns} turns</span>
-        </div>
-        <div className="cc-life-row">
-          <LifeBtn delta={-1} onAdjust={onAdjustLife} />
-          <span className="cc-life">{player.life}</span>
-          <LifeBtn delta={1} onAdjust={onAdjustLife} />
-        </div>
-        <div className="cc-time">{fmt(player.elapsed)}</div>
-        {active && !player.eliminated && (
-          <div className="cc-tap">{running ? "tap to pass" : "paused"}</div>
-        )}
-      </div>
-      {/* Note strip — sits just above commander footer */}
-      {noteText ? (
-        <div className="cc-seat-note">{noteText}</div>
-      ) : null}
-      {/* Commander footer — pinned to the bottom */}
-      {(commanderName || commanderText) && (
-        <div className="cc-seat-cmdr-footer">
-          <div className="cc-seat-cmdr-row">
-            {commanderName && <span className="cc-seat-cmdrname">{commanderName}</span>}
-            {commanderPower != null && commanderToughness != null && (
-              <span className="cc-seat-pt">{commanderPower}/{commanderToughness}</span>
-            )}
-            {commanderLoyalty != null && commanderPower == null && (
-              <span className="cc-seat-pt loyalty">{commanderLoyalty}</span>
-            )}
+    <>
+      {scanOpen && onSetCommander && (
+        <CommanderScanModal
+          onConfirm={(data) => { onSetCommander(data); setScanOpen(false); }}
+          onClose={() => setScanOpen(false)}
+        />
+      )}
+      <div
+        className={`cc-seat ${active ? "active" : ""} ${player.eliminated ? "out" : ""}`}
+        style={{
+          "--ink": color.ink,
+          "--glow": color.glow,
+          "--seatbg": color.bg,
+          ...(commanderImg ? { "--cmdr-img": `url("${commanderImg}")` } : {}),
+        }}
+        onPointerDown={start}
+        onPointerUp={end}
+        onPointerLeave={() => clearTimeout(pressTimer.current)}
+      >
+        {commanderImg && <div className="cc-seat-art" />}
+        {/* Main stats — centered in the available space */}
+        <div className="cc-seat-main">
+          <div className="cc-seat-top">
+            <span className="cc-seatname">
+              {player.name}
+              {player.claimedBy && (
+                <span className="cc-onphone" title="On their own phone">📱</span>
+              )}
+            </span>
+            <span className="cc-turns">{player.turns} turns</span>
           </div>
+          <div className="cc-life-row">
+            <LifeBtn delta={-1} onAdjust={onAdjustLife} />
+            <span className="cc-life">{player.life}</span>
+            <LifeBtn delta={1} onAdjust={onAdjustLife} />
+          </div>
+          <div className="cc-time">{fmt(player.elapsed)}</div>
+          {active && !player.eliminated && (
+            <div className="cc-tap">{running ? "tap to pass" : "paused"}</div>
+          )}
+        </div>
+        {/* Note strip — sits just above commander footer */}
+        {noteText ? (
+          <div className="cc-seat-note">{noteText}</div>
+        ) : null}
+        {/* Commander footer — pinned to the bottom */}
+        <div className="cc-seat-cmdr-footer">
+          {commanderName ? (
+            <div className="cc-seat-cmdr-row">
+              <span className="cc-seat-cmdrname">{commanderName}</span>
+              {commanderPower != null && commanderToughness != null && (
+                <span className="cc-seat-pt">{commanderPower}/{commanderToughness}</span>
+              )}
+              {commanderLoyalty != null && commanderPower == null && (
+                <span className="cc-seat-pt loyalty">{commanderLoyalty}</span>
+              )}
+              {onSetCommander && (
+                <button
+                  className="cc-seat-scan-icon"
+                  onClick={(e) => { e.stopPropagation(); setScanOpen(true); }}
+                  title="Change commander"
+                >📷</button>
+              )}
+            </div>
+          ) : onSetCommander ? (
+            <button
+              className="cc-seat-setcmdr"
+              onClick={(e) => { e.stopPropagation(); setScanOpen(true); }}
+            >
+              📷 Set Commander
+            </button>
+          ) : null}
           {commanderText && (
             <div className="cc-seat-cmdrtext">{commanderText}</div>
           )}
         </div>
-      )}
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -2014,6 +2052,28 @@ const CSS = `
   font-size: 10px; color: #d8bc70; line-height: 1.3;
   margin-top: 2px; word-break: break-word;
 }
+
+/* ── host "Set Commander" button inside seat footer ── */
+.cc-seat-setcmdr {
+  width: 100%; padding: 5px 8px;
+  font-family: 'Cinzel', serif; font-size: 10px; letter-spacing: 1px;
+  text-transform: uppercase; color: #8a8270;
+  background: rgba(0,0,0,0.35); border: 1px dashed #34301f;
+  border-radius: 6px; cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.cc-seat-setcmdr:hover { color: #d8bc70; border-color: #b89a4e; }
+.cc-seat-setcmdr:active { opacity: 0.7; }
+
+/* ── small 📷 icon next to commander name (change commander) ── */
+.cc-seat-scan-icon {
+  flex-shrink: 0; padding: 0 3px;
+  background: transparent; border: none;
+  font-size: 12px; line-height: 1; cursor: pointer;
+  opacity: 0.5; transition: opacity .15s;
+}
+.cc-seat-scan-icon:hover { opacity: 1; }
+.cc-seat-scan-icon:active { transform: scale(0.85); }
 
 /* ── commander scan button ── */
 .cc-scan-btn {
