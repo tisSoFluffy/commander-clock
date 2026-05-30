@@ -189,6 +189,7 @@ function SoloOrHostApp({ mode, onExit }) {
   const stateRef = useRef(null);
   const commanderImagesRef = useRef({});
   const notesRef = useRef({});
+  const lastPongRef = useRef(new Map()); // peerId → timestamp of last pong
 
   // ── timer ticks ─────────────────────────────────────────
   const tickRef = useRef(null);
@@ -238,6 +239,7 @@ function SoloOrHostApp({ mode, onExit }) {
       peer.on("connection", (conn) => {
         conn.on("open", () => {
           connsRef.current.set(conn.peer, conn);
+          lastPongRef.current.set(conn.peer, Date.now()); // grace period on connect
           setConnectedPeers((p) => [...p, { id: conn.peer }]);
           sendTo(conn, { type: "state", payload: stateRef.current });
           sendTo(conn, {
@@ -258,6 +260,7 @@ function SoloOrHostApp({ mode, onExit }) {
         conn.on("data", (msg) => handlePeerMsg(conn, msg));
         conn.on("close", () => {
           connsRef.current.delete(conn.peer);
+          lastPongRef.current.delete(conn.peer);
           setConnectedPeers((p) => p.filter((x) => x.id !== conn.peer));
           setPlayers((prev) =>
             prev.map((pl) =>
@@ -295,14 +298,43 @@ function SoloOrHostApp({ mode, onExit }) {
     notesRef.current = notes;
   }, [notes]);
 
+  // ── heartbeat: ping every 8 s, evict peers silent for 25 s ──
+  useEffect(() => {
+    if (mode !== "host") return;
+    const iv = setInterval(() => {
+      const now = Date.now();
+      for (const [id, conn] of connsRef.current.entries()) {
+        const last = lastPongRef.current.get(id) ?? now; // grace on first ping
+        if (now - last > 25000) {
+          // evict ghost connection
+          connsRef.current.delete(id);
+          lastPongRef.current.delete(id);
+          setConnectedPeers((p) => p.filter((x) => x.id !== id));
+          setPlayers((prev) =>
+            prev.map((pl) => pl.claimedBy === id ? { ...pl, claimedBy: null } : pl)
+          );
+          try { conn.close(); } catch {}
+        } else {
+          sendTo(conn, { type: "ping" });
+        }
+      }
+    }, 8000);
+    return () => clearInterval(iv);
+  }, [mode]);
+
   const sendTo = (conn, msg) => { try { conn.send(msg); } catch {} };
 
   const handlePeerMsg = (conn, msg) => {
     if (!msg || typeof msg !== "object") return;
-    if (msg.type === "claim") {
+    if (msg.type === "pong") {
+      lastPongRef.current.set(conn.peer, Date.now());
+    } else if (msg.type === "claim") {
       setPlayers((prev) => {
         const target = prev[msg.seat];
-        if (!target || target.claimedBy) return prev;
+        if (!target) return prev;
+        // Allow claim if seat is free OR the current claimant is a ghost (no active conn)
+        const blockedByActive = target.claimedBy && connsRef.current.has(target.claimedBy);
+        if (blockedByActive) return prev;
         return prev.map((p, i) =>
           p.claimedBy === conn.peer
             ? { ...p, claimedBy: null }
@@ -693,7 +725,10 @@ function JoinerApp({ initialCode, onExit }) {
   const [status, setStatus] = useState("idle");
   const [errorMsg, setErrorMsg] = useState(null);
   const [roster, setRoster] = useState([]);
-  const [mySeat, setMySeat] = useState(null);
+  const [mySeat, setMySeat] = useState(() => {
+    const saved = sessionStorage.getItem(`cmdr-seat-${initialCode}`);
+    return saved !== null ? parseInt(saved, 10) : null;
+  });
   const [remote, setRemote] = useState(null);
   const [scanOpen, setScanOpen] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
@@ -701,6 +736,7 @@ function JoinerApp({ initialCode, onExit }) {
   const [notes, setNotes] = useState({});
   const peerRef = useRef(null);
   const connRef = useRef(null);
+  const mySeatRef = useRef(mySeat);
 
   const connect = useCallback(() => {
     setStatus("connecting");
@@ -713,8 +749,22 @@ function JoinerApp({ initialCode, onExit }) {
         connRef.current = conn;
         conn.on("open", () => setStatus("roster"));
         conn.on("data", (msg) => {
+          if (msg.type === "ping") { try { conn.send({ type: "pong" }); } catch {} }
           if (msg.type === "state") setRemote(msg.payload);
-          if (msg.type === "roster") setRoster(msg.payload || []);
+          if (msg.type === "roster") {
+            const r = msg.payload || [];
+            setRoster(r);
+            // Auto-reclaim remembered seat if it's free or was held by a ghost
+            const saved = mySeatRef.current;
+            if (saved !== null) {
+              const entry = r.find((x) => x.seat === saved);
+              // entry.claimedBy will be null if host already freed it; attempt either way
+              if (entry) {
+                conn.send({ type: "claim", seat: saved });
+                setStatus("connected");
+              }
+            }
+          }
           if (msg.type === "commander-images") setCommanderImages(msg.payload || {});
           if (msg.type === "notes") setNotes(msg.payload || {});
         });
@@ -751,7 +801,9 @@ function JoinerApp({ initialCode, onExit }) {
 
   const claim = (seat) => {
     connRef.current?.send({ type: "claim", seat });
+    mySeatRef.current = seat;
     setMySeat(seat);
+    sessionStorage.setItem(`cmdr-seat-${code}`, seat);
     setStatus("connected");
   };
 
